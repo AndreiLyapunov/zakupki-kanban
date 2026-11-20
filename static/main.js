@@ -34,7 +34,14 @@ async function loadProjects() {
     container.innerHTML = '';
     list.forEach(p => {
         const div = document.createElement('div');
-        div.className = 'proj-item' + (p.id === currentProjectId ? ' active' : '');
+        let statusClass = 'proj-new';
+        if (p.stats) {
+            const inWork = (p.stats.accounting || 0) + (p.stats.paid || 0) + (p.stats.transit || 0);
+            const isRec = (p.stats.received || 0) > 0;
+            if (inWork > 0) statusClass = 'proj-work';
+            else if (isRec) statusClass = 'proj-done';
+        }
+        div.className = `proj-item ${statusClass}` + (p.id === currentProjectId ? ' active' : '');
         let b = '';
         if (p.stats) {
             if (p.stats.accounting) b += `<span class="badge-st" style="background:#fef08a;color:#854d0e;">На оплату: ${p.stats.accounting}</span>`;
@@ -100,6 +107,86 @@ function extractNum(val) {
     return m ? parseFloat(m[0]) : 0;
 }
 
+let editingMetaKey = null;
+
+function startEditMeta(key) {
+    editingMetaKey = key;
+    const sc = document.querySelector('.table-scroll');
+    const l = sc ? sc.scrollLeft : 0, t = sc ? sc.scrollTop : 0;
+    renderComparisonTable();
+    const nsc = document.querySelector('.table-scroll');
+    if (nsc) { nsc.scrollLeft = l; nsc.scrollTop = t; }
+}
+
+function cancelEditMeta() {
+    editingMetaKey = null;
+    const sc = document.querySelector('.table-scroll');
+    const l = sc ? sc.scrollLeft : 0, t = sc ? sc.scrollTop : 0;
+    renderComparisonTable();
+    const nsc = document.querySelector('.table-scroll');
+    if (nsc) { nsc.scrollLeft = l; nsc.scrollTop = t; }
+}
+
+async function saveEditedMeta(invId, field, inputId) {
+    const val = document.getElementById(inputId).value;
+    await fetch(`/api/invoices/${invId}/edit_meta`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({field, value: val})
+    });
+    editingMetaKey = null;
+    await selectProject(currentProjectId);
+    showSaveNotice('✔ Сохранено!');
+}
+
+let editingOfferId = null;
+
+function showSaveNotice(msg) {
+    let el = document.getElementById('saveToast');
+    if (!el) {
+        el = document.createElement('div');
+        el.id = 'saveToast';
+        el.style.cssText = 'position:fixed;top:15px;right:20px;background:#16a34a;color:#fff;padding:10px 18px;border-radius:6px;font-weight:bold;font-size:13px;box-shadow:0 4px 12px rgba(0,0,0,0.2);z-index:9999;transition:opacity 0.3s;';
+        document.body.appendChild(el);
+    }
+    el.innerText = msg;
+    el.style.opacity = '1';
+    clearTimeout(el._timer);
+    el._timer = setTimeout(() => { el.style.opacity = '0'; }, 3000);
+}
+
+function startEditOffer(offerId) {
+    editingOfferId = offerId;
+    const sc = document.querySelector('.table-scroll');
+    const l = sc ? sc.scrollLeft : 0, t = sc ? sc.scrollTop : 0;
+    renderComparisonTable();
+    const nsc = document.querySelector('.table-scroll');
+    if (nsc) { nsc.scrollLeft = l; nsc.scrollTop = t; }
+}
+
+function cancelEditOffer() {
+    editingOfferId = null;
+    const sc = document.querySelector('.table-scroll');
+    const l = sc ? sc.scrollLeft : 0, t = sc ? sc.scrollTop : 0;
+    renderComparisonTable();
+    const nsc = document.querySelector('.table-scroll');
+    if (nsc) { nsc.scrollLeft = l; nsc.scrollTop = t; }
+}
+
+async function saveEditedOffer(offerId) {
+    const price = document.getElementById(`edit_pr_${offerId}`).value;
+    const kg = document.getElementById(`edit_kg_${offerId}`).value;
+    const meters = document.getElementById(`edit_m_${offerId}`).value;
+    await fetch(`/api/offers/${offerId}/edit`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({price, kg, meters})
+    });
+    editingOfferId = null;
+    await selectProject(currentProjectId);
+    showSaveNotice('✔ Изменения в ячейке сохранены!');
+}
+
 function renderComparisonTable() {
     const ws = document.getElementById('projectWorkspace');
     const p = currentProjectData.project;
@@ -145,7 +232,7 @@ function renderComparisonTable() {
             });
         }
 
-        html += `<tr class="${rec ? rec.received_color : ''}"><td class="col-item" style="${rec ? 'background:inherit;' : ''}"><b>${item.name}</b></td>`;
+        html += `<tr><td class="col-item ${rec ? rec.received_color : ''}"><b>${item.name}</b></td>`;
         invoices.forEach(inv => {
             const off = offers.find(o => o.invoice_id === inv.id && o.item_id === item.id);
             if (off && (off.price > 0 || off.kg || off.meters)) {
@@ -173,8 +260,24 @@ function renderComparisonTable() {
                     }
                 }
 
-                const st = off.kanban_status ? `<span style="color:#15803d;font-weight:bold;font-size:11px;"> [В работе]</span>` : '';
-                html += `<td class="col-sup offer-cell ${cellBg} ${off.selected ? 'offer-selected' : ''}"><label style="cursor:pointer;font-weight:bold;font-size:11px;"><input type="checkbox" ${off.selected ? 'checked' : ''} ${off.kanban_status ? 'disabled' : ''} onchange="toggleOffer(${off.id}, this.checked)"> Выбрать</label>${st}<div style="margin-top:2px;">Цена с НДС: <b>${off.price} руб.</b><span style="font-size:11px;color:#334155;">${unitHint}</span></div><div style="color:#475569;">Вес: ${off.kg || '—'} кг | Метры/инфо: <b>${off.meters || '—'}</b></div></td>`;
+                if (editingOfferId === off.id) {
+                    html += `<td class="col-sup offer-cell" style="background:#fffbeb;border:2px solid #f59e0b;">
+                        <div style="font-size:11px;font-weight:bold;margin-bottom:3px;">Редактирование:</div>
+                        <input type="number" step="0.01" id="edit_pr_${off.id}" value="${off.price}" placeholder="Цена с НДС" style="padding:3px;margin-bottom:3px;font-size:12px;">
+                        <div style="display:flex;gap:4px;margin-bottom:4px;">
+                            <input type="text" id="edit_kg_${off.id}" value="${off.kg || ''}" placeholder="Вес (кг)" style="padding:3px;font-size:11px;">
+                            <input type="text" id="edit_m_${off.id}" value="${off.meters || ''}" placeholder="Метры/инфо" style="padding:3px;font-size:11px;">
+                        </div>
+                        <div style="display:flex;gap:4px;">
+                            <button type="button" class="btn-green" style="padding:3px 7px;font-size:11px;flex:1;" onclick="saveEditedOffer(${off.id})">💾 Сохранить</button>
+                            <button type="button" class="btn-gray" style="padding:3px 7px;font-size:11px;" onclick="cancelEditOffer()">✖</button>
+                        </div>
+                    </td>`;
+                } else {
+                    const st = off.kanban_status ? `<span style="color:#15803d;font-weight:bold;font-size:11px;"> [В работе]</span>` : '';
+                    const editBtn = `<button type="button" onclick="startEditOffer(${off.id})" title="Редактировать цену, вес или метры" style="float:right;background:transparent;color:#475569;border:1px solid #cbd5e1;padding:1px 5px;font-size:11px;">✏️</button>`;
+                    html += `<td class="col-sup offer-cell ${cellBg} ${off.selected ? 'offer-selected' : ''}">${editBtn}<label style="cursor:pointer;font-weight:bold;font-size:11px;"><input type="checkbox" ${off.selected ? 'checked' : ''} ${off.kanban_status ? 'disabled' : ''} onchange="toggleOffer(${off.id}, this.checked)"> Выбрать</label>${st}<div style="margin-top:2px;">Цена с НДС: <b>${off.price} руб.</b><span style="font-size:11px;color:#334155;">${unitHint}</span></div><div style="color:#475569;">Вес: ${off.kg || '—'} кг | Метры/инфо: <b>${off.meters || '—'}</b></div></td>`;
+                }
             } else { html += `<td class="col-sup"></td>`; }
         });
         html += `</tr>`;
@@ -186,9 +289,37 @@ function renderComparisonTable() {
         html += `<td class="col-sup">${sum.toFixed(2)} руб.</td>`;
     });
     html += `</tr><tr><td class="col-item"><b>Стоимость доставки до терминала:</b></td>`;
-    invoices.forEach(inv => { html += `<td class="col-sup">${inv.delivery_cost ? inv.delivery_cost + ' руб.' : ''}</td>`; });
-    html += `</tr><tr><td class="col-item"><b>Примечания (ГОСТ, страна, сроки):</b></td>`;
-    invoices.forEach(inv => { html += `<td class="col-sup">${inv.notes || ''}</td>`; });
+    invoices.forEach(inv => {
+        const key = `deliv_${inv.id}`;
+        if (editingMetaKey === key) {
+            html += `<td class="col-sup" style="background:#fffbeb;border:2px solid #f59e0b;">
+                <input type="number" step="0.01" id="inp_${key}" value="${inv.delivery_cost || ''}" placeholder="Сумма (руб.)" style="padding:3px;margin-bottom:4px;font-size:12px;">
+                <div style="display:flex;gap:4px;">
+                    <button type="button" class="btn-green" style="padding:3px 7px;font-size:11px;flex:1;" onclick="saveEditedMeta(${inv.id}, 'delivery_cost', 'inp_${key}')">💾 Сохранить</button>
+                    <button type="button" class="btn-gray" style="padding:3px 7px;font-size:11px;" onclick="cancelEditMeta()">✖</button>
+                </div>
+            </td>`;
+        } else {
+            const btn = `<button type="button" onclick="startEditMeta('${key}')" title="Редактировать доставку" style="float:right;background:transparent;color:#475569;border:1px solid #cbd5e1;padding:1px 5px;font-size:11px;">✏️</button>`;
+            html += `<td class="col-sup">${btn}${inv.delivery_cost ? '<b>' + inv.delivery_cost + ' руб.</b>' : '<span style="color:#94a3b8;">—</span>'}</td>`;
+        }
+    });
+    html += `</tr><tr><td class="col-item"><b>Примечания:</b></td>`;
+    invoices.forEach(inv => {
+        const key = `notes_${inv.id}`;
+        if (editingMetaKey === key) {
+            html += `<td class="col-sup" style="background:#fffbeb;border:2px solid #f59e0b;">
+                <textarea id="inp_${key}" rows="2" placeholder="Текст примечания..." style="padding:3px;margin-bottom:4px;font-size:11px;">${inv.notes || ''}</textarea>
+                <div style="display:flex;gap:4px;">
+                    <button type="button" class="btn-green" style="padding:3px 7px;font-size:11px;flex:1;" onclick="saveEditedMeta(${inv.id}, 'notes', 'inp_${key}')">💾 Сохранить</button>
+                    <button type="button" class="btn-gray" style="padding:3px 7px;font-size:11px;" onclick="cancelEditMeta()">✖</button>
+                </div>
+            </td>`;
+        } else {
+            const btn = `<button type="button" onclick="startEditMeta('${key}')" title="Редактировать примечание" style="float:right;background:transparent;color:#475569;border:1px solid #cbd5e1;padding:1px 5px;font-size:11px;">✏️</button>`;
+            html += `<td class="col-sup">${btn}${inv.notes || '<span style="color:#94a3b8;">—</span>'}</td>`;
+        }
+    });
     html += `</tr></tbody></table></div>`;
     ws.innerHTML = html;
 }
@@ -293,37 +424,56 @@ async function sendSelectedToWork() {
     selectProject(currentProjectId);
 }
 
+let activeKanbanProjectId = null;
+let kanbanCardsCache = [];
+
 async function loadKanban() {
     const res = await fetch('/api/kanban');
-    const cards = await res.json();
+    kanbanCardsCache = await res.json();
+    renderKanbanProjectsSidebar();
+    renderKanbanBoard();
+}
+
+function renderKanbanProjectsSidebar() {
+    const sb = document.getElementById('kanbanProjectsList');
+    if (!sb) return;
+    sb.innerHTML = '';
+    const projMap = new Map();
+    kanbanCardsCache.forEach(c => {
+        if (!projMap.has(c.project_id)) projMap.set(c.project_id, { id: c.project_id, name: c.project_name, count: 0 });
+        projMap.get(c.project_id).count += 1;
+    });
+    const allDiv = document.createElement('div');
+    allDiv.className = 'proj-item' + (activeKanbanProjectId === null ? ' active' : '');
+    allDiv.innerHTML = `<div style="font-size:13px;">Все проекты в работе (${kanbanCardsCache.length} сч.)</div>`;
+    allDiv.onclick = () => { activeKanbanProjectId = null; renderKanbanProjectsSidebar(); renderKanbanBoard(); };
+    sb.appendChild(allDiv);
+
+    projMap.forEach(p => {
+        const div = document.createElement('div');
+        div.className = 'proj-item' + (activeKanbanProjectId === p.id ? ' active' : '');
+        div.innerHTML = `<div style="font-size:13px;">📁 ${p.name}</div><div style="font-size:11px;color:#64748b;">Счетов в работе: <b>${p.count}</b></div>`;
+        div.onclick = () => { activeKanbanProjectId = p.id; renderKanbanProjectsSidebar(); renderKanbanBoard(); };
+        sb.appendChild(div);
+    });
+}
+
+function renderKanbanBoard() {
     ['accounting', 'paid', 'transit', 'arrived'].forEach(st => document.getElementById('k-' + st).innerHTML = '');
     const today = new Date().toISOString().split('T');
-    cards.forEach(c => {
+    const filtered = activeKanbanProjectId === null ? kanbanCardsCache : kanbanCardsCache.filter(c => c.project_id === activeKanbanProjectId);
+    filtered.forEach(c => {
         const div = document.createElement('div');
         div.className = 'k-card' + (c.arrival_date && c.arrival_date <= today ? ' overdue' : '');
         div.draggable = true;
-        div.ondragstart = (e) => {
-            e.dataTransfer.setData('text/plain', JSON.stringify({inv_id: c.invoice_id, old_status: c.kanban_status}));
-        };
+        div.ondragstart = (e) => { e.dataTransfer.setData('text/plain', JSON.stringify({inv_id: c.invoice_id, old_status: c.kanban_status})); };
         let fileLink = c.filename ? `<a href="/api/invoice_file/${c.invoice_id}" target="_blank" style="font-size:12px;">📄 Открыть счёт</a>` : '';
         const invLabel = (c.invoice_num && c.invoice_num !== 'Из таблицы') ? ` — ${c.invoice_num}` : '';
-        div.innerHTML = `
-            <div style="font-size:12px;font-weight:bold;color:#1d4ed8;margin-bottom:3px;">📁 ${c.project_name}</div>
-            <div style="font-size:13px;font-weight:bold;color:#0f172a;">${c.supplier}${invLabel}</div>
-            <div style="font-size:12px;color:#475569;margin:4px 0;">Позиций: <b>${c.items_count}</b> | Итого: <b>${(c.total_price || 0).toFixed(2)} руб.</b></div>
-            <div style="font-size:12px;margin-top:6px;">
-                <input type="text" placeholder="ТК (СДЭК, ДЛ...)" value="${c.carrier || ''}" onchange="updateLogistics(${c.invoice_id}, 'carrier', this.value)" style="margin-bottom:4px;padding:4px;">
-                <input type="text" placeholder="Трек-номер" value="${c.track_num || ''}" onchange="updateLogistics(${c.invoice_id}, 'track_num', this.value)" style="margin-bottom:4px;padding:4px;">
-                <input type="date" value="${c.arrival_date || ''}" onchange="updateLogistics(${c.invoice_id}, 'arrival_date', this.value)" style="padding:4px;">
-            </div>
-            <div style="display:flex;justify-content:space-between;align-items:center;margin-top:8px;">
-                ${fileLink}
-                <button class="btn-green" style="padding:4px 8px;font-size:12px;" onclick="openColorModal(${c.invoice_id})">✔ Получено</button>
-            </div>
-        `;
+        div.innerHTML = `<div style="font-size:12px;font-weight:bold;color:#1d4ed8;margin-bottom:3px;">📁 ${c.project_name}</div><div style="font-size:13px;font-weight:bold;color:#0f172a;">${c.supplier}${invLabel}</div><div style="font-size:12px;color:#475569;margin:4px 0;">Позиций: <b>${c.items_count}</b> | Итого: <b>${(c.total_price || 0).toFixed(2)} руб.</b></div><div style="font-size:12px;margin-top:6px;"><input type="text" placeholder="ТК" value="${c.carrier || ''}" onchange="updateLogistics(${c.invoice_id}, 'carrier', this.value)" style="margin-bottom:4px;padding:4px;"><input type="text" placeholder="Трек-номер" value="${c.track_num || ''}" onchange="updateLogistics(${c.invoice_id}, 'track_num', this.value)" style="margin-bottom:4px;padding:4px;"><input type="date" value="${c.arrival_date || ''}" onchange="updateLogistics(${c.invoice_id}, 'arrival_date', this.value)" style="padding:4px;"></div><div style="display:flex;justify-content:space-between;align-items:center;margin-top:8px;">${fileLink}<button class="btn-green" style="padding:4px 8px;font-size:12px;" onclick="openColorModal(${c.invoice_id})">✔ Получено</button></div>`;
         if (document.getElementById('k-' + c.kanban_status)) document.getElementById('k-' + c.kanban_status).appendChild(div);
     });
 }
+
 function allowDrop(e) { e.preventDefault(); }
 async function dropCard(e, newStatus) {
     e.preventDefault();

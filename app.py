@@ -168,7 +168,10 @@ HTML_TEMPLATE = '''
         .proj-sidebar { width: 270px; min-width: 270px; background: #fff; border-radius: 8px; padding: 12px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
         .proj-item { padding: 10px; border-bottom: 1px solid #eee; cursor: pointer; border-radius: 4px; }
         .proj-item:hover { background: #f1f5f9; }
-        .proj-item.active { background: #dbeafe; font-weight: bold; color: #1d4ed8; }
+        .proj-new { background: #fef9c3; border-left: 4px solid #eab308; }
+        .proj-work { background: #dbeafe; border-left: 4px solid #2563eb; }
+        .proj-done { background: #dcfce7; border-left: 4px solid #16a34a; }
+        .proj-item.active { outline: 2px solid #1e293b; outline-offset: -2px; font-weight: bold; }
         .proj-main { flex: 1; background: #fff; border-radius: 8px; padding: 15px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); overflow-x: auto; }
         
         button { background: #2563eb; color: #fff; border: none; padding: 7px 14px; border-radius: 4px; cursor: pointer; font-size: 13px; }
@@ -240,7 +243,12 @@ HTML_TEMPLATE = '''
 
 <!-- ВКЛАДКА 2: КАНБАН -->
 <div id="view-kanban" class="view">
-    <div class="kanban-board">
+    <div class="proj-layout">
+        <div class="proj-sidebar">
+            <h3 style="margin: 0 0 10px 0; font-size: 15px;">Проекты в работе</h3>
+            <div id="kanbanProjectsList"></div>
+        </div>
+        <div class="kanban-board" style="flex: 1;">
         <div class="k-col" ondrop="dropCard(event, 'accounting')" ondragover="allowDrop(event)">
             <h3>Передано в бухгалтерию</h3>
             <div class="k-list" id="k-accounting"></div>
@@ -257,6 +265,7 @@ HTML_TEMPLATE = '''
             <h3>Прибыло / На приёмке</h3>
             <div class="k-list" id="k-arrived"></div>
         </div>
+    </div>
     </div>
 </div>
 
@@ -508,6 +517,28 @@ def select_all_invoice(inv_id):
             WHERE invoice_id=? AND kanban_status='' AND received_color=''
             AND (price > 0 OR kg != '' OR meters != '')
         """, (sel, inv_id))
+    return jsonify({'ok': True})
+
+@app.route('/api/invoices/<int:inv_id>/edit_meta', methods=['POST'])
+def edit_invoice_meta(inv_id):
+    data = request.json or {}
+    field = data.get('field')
+    val = data.get('value', '')
+    with sqlite3.connect(DB_PATH) as conn:
+        if field == 'delivery_cost':
+            conn.execute('UPDATE invoices SET delivery_cost=? WHERE id=?', (float(val or 0), inv_id))
+        elif field == 'notes':
+            conn.execute('UPDATE invoices SET notes=? WHERE id=?', (str(val).strip(), inv_id))
+    return jsonify({'ok': True})
+
+@app.route('/api/offers/<int:offer_id>/edit', methods=['POST'])
+def edit_offer(offer_id):
+    data = request.json or {}
+    price = float(data.get('price') or 0)
+    kg = str(data.get('kg') or '').strip()
+    meters = str(data.get('meters') or '').strip()
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute('UPDATE offers SET price=?, kg=?, meters=? WHERE id=?', (price, kg, meters, offer_id))
     return jsonify({'ok': True})
 
 @app.route('/api/offers/<int:offer_id>/select', methods=['POST'])
