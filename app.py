@@ -87,6 +87,10 @@ def init_db():
             conn.execute('ALTER TABLE projects ADD COLUMN sort_order INTEGER DEFAULT NULL')
         except Exception:
             pass
+        try:
+            conn.execute('ALTER TABLE invoices ADD COLUMN sort_order INTEGER DEFAULT NULL')
+        except Exception:
+            pass
 
 def make_safe_folder(name):
     clean = re.sub(r'[^\w\s-]', '', name).strip().replace(' ', '_')
@@ -245,18 +249,16 @@ HTML_TEMPLATE = '''
         input[type="text"], input[type="number"], input[type="date"], textarea { width: 100%; padding: 7px; border: 1px solid #cbd5e1; border-radius: 4px; }
         .scan-alert { background: #fef2f2; border: 1px solid #dc2626; color: #991b1b; padding: 10px; border-radius: 5px; font-weight: bold; display: none; }
     
-        tr.row-focused td,
-        tr.row-focused td.col-item,
-        tr.row-focused td.price-best,
-        tr.row-focused td.price-unit-best,
-        tr.row-focused td.price-worst,
-        tr.row-focused td.offer-selected,
-        tr.row-focused td.c-1, tr.row-focused td.c-2, tr.row-focused td.c-3,
-        tr.row-focused td.c-4, tr.row-focused td.c-5, tr.row-focused td.c-6, tr.row-focused td.c-7 {
+        tr.row-focused td {
             border-top: 2px solid #2563eb !important;
             border-bottom: 2px solid #2563eb !important;
-            background-color: #dbeafe !important;
+            background-color: #dbeafe;
         }
+        tr.row-focused td.col-item { background-color: #dbeafe !important; }
+        tr.row-focused td.price-best { background-color: #86efac !important; }
+        tr.row-focused td.price-unit-best { background-color: #93c5fd !important; }
+        tr.row-focused td.price-worst { background-color: #fda4af !important; }
+        tr.row-focused td.offer-selected { box-shadow: inset 0 0 0 2px #16a34a !important; }
     </style>
 </head>
 <body>
@@ -414,7 +416,7 @@ HTML_TEMPLATE = '''
     </div>
 </div>
 
-<script src="/static/main.js?v=27"></script>
+<script src="/static/main.js?v=39"></script>
 
 </body>
 </html>
@@ -494,7 +496,7 @@ def get_project_details(proj_id):
         conn.row_factory = sqlite3.Row
         proj = dict(conn.execute('SELECT * FROM projects WHERE id=?', (proj_id,)).fetchone())
         items = [dict(r) for r in conn.execute('SELECT * FROM project_items WHERE project_id=?', (proj_id,)).fetchall()]
-        invoices = [dict(r) for r in conn.execute('SELECT * FROM invoices WHERE project_id=?', (proj_id,)).fetchall()]
+        invoices = [dict(r) for r in conn.execute('SELECT * FROM invoices WHERE project_id=? ORDER BY COALESCE(sort_order, 999999), id', (proj_id,)).fetchall()]
         offers = [dict(r) for r in conn.execute('''
             SELECT o.* FROM offers o
             JOIN invoices i ON o.invoice_id = i.id
@@ -520,17 +522,17 @@ def detect_services_from_text(text):
 
 def parse_invoice_metadata_and_lines(filename, text):
     # Извлекаем номер/дату счёта и поставщика из имени файла или текста
-    base_name = os.path.splitext(filename)
+    base_name, _ = os.path.splitext(filename)
     inv_num = ''
     supplier = ''
-    m_fn = re.search(r'(сч[её]т\s*№?\s*[0-9A-Za-zА-Яа-я/-]+(?:\s*от\s*[0-9.]+)?)', base_name, re.IGNORECASE)
+    m_fn = re.search(r'(сч[её]т\s*(?:на\s*оплату\s*)?№?\s*[0-9A-Za-zА-Яа-я/-]*\d+[0-9A-Za-zА-Яа-я/-]*(?:\s*от\s*[0-9.]+)?)', base_name, re.IGNORECASE)
     if m_fn:
         inv_num = m_fn.group(1).strip()
         rest = base_name.replace(m_fn.group(0), '').strip(' _-.')
         if rest:
             supplier = rest.capitalize()
     if not inv_num and text:
-        m_txt = re.search(r'(сч[её]т\s*№?\s*[0-9A-Za-zА-Яа-я/-]+(?:\s*от\s*[0-9.]+\s*(?:г\.|года)?)?)', text, re.IGNORECASE)
+        m_txt = re.search(r'(сч[её]т\s*(?:на\s*оплату\s*)?№?\s*[0-9A-Za-zА-Яа-я/-]*\d+[0-9A-Za-zА-Яа-я/-]*(?:\s*от\s*[0-9.]+\s*(?:г\.|года)?)?)', text, re.IGNORECASE)
         if m_txt:
             inv_num = m_txt.group(1).strip()
     if not supplier and text:
@@ -539,7 +541,7 @@ def parse_invoice_metadata_and_lines(filename, text):
             supplier = m_sup.group(1).strip()
     total_sum = ''
     if text:
-        m_tot = re.search(r'(?:Всего к оплате|Всего с НДС|Итого с НДС|Итого к оплате)[^0-9\n]*([0-9]{1,3}(?:[\s\u00a0]?[0-9]{3})*[.,][0-9]{2})', text, re.IGNORECASE)
+        m_tot = re.search(r'(?:Всего к оплате|Всего с НДС|Итого с НДС|Итого к оплате|на сумму)\s*:?\s*([0-9]{1,3}(?:[\s\u00a0]?[0-9]{3})*[.,][0-9]{2})', text, re.IGNORECASE)
         if m_tot:
             total_sum = m_tot.group(1).replace(' ', '').replace('\u00a0', '').replace(',', '.')
     return supplier, inv_num, total_sum
@@ -560,73 +562,54 @@ def parse_preview():
 
 @app.route('/api/invoices', methods=['POST'])
 def add_invoice():
-    proj_id = request.form.get('project_id')
-    supplier = request.form.get('supplier')
-    invoice_num = request.form.get('invoice_num')
-    delivery_cost = request.form.get('delivery_cost', 0)
-    notes = request.form.get('notes', '')
-    offers = json.loads(request.form.get('offers', '[]'))
-
+    project_id = request.form.get('project_id')
+    supplier = request.form.get('supplier', '').strip()
+    invoice_num = request.form.get('invoice_num', '').strip()
+    delivery_cost = float(request.form.get('delivery_cost') or 0)
+    notes = request.form.get('notes', '').strip()
+    offers_json = json.loads(request.form.get('offers', '[]'))
     with sqlite3.connect(DB_PATH) as conn:
-        conn.row_factory = sqlite3.Row
-        proj = conn.execute('SELECT folder_path FROM projects WHERE id=?', (proj_id,)).fetchone()
-        folder_path = proj['folder_path']
-        os.makedirs(folder_path, exist_ok=True)
-
+        proj = conn.execute('SELECT folder_path FROM projects WHERE id=?', (project_id,)).fetchone()
+        folder_path = proj[0] if proj else ''
         filename = ''
-        if 'file' in request.files:
+        if 'file' in request.files and request.files['file'].filename:
             f = request.files['file']
-            if f.filename:
-                safe_file = f"{supplier}_{invoice_num}_{f.filename}".replace(' ', '_').replace('/', '-')
-                f.save(os.path.join(folder_path, safe_file))
-                filename = safe_file
-
-        cur = conn.execute('''
-            INSERT INTO invoices (project_id, supplier, invoice_num, delivery_cost, notes, filename)
-            VALUES (?, ?, ?, ?, ?, ?)
-        ''', (proj_id, supplier, invoice_num, delivery_cost, notes, filename))
+            orig_name = os.path.basename(f.filename)
+            if os.path.isdir(folder_path):
+                if os.path.exists(os.path.join(folder_path, orig_name)):
+                    filename = orig_name
+                else:
+                    f.seek(0, os.SEEK_END)
+                    f_sz = f.tell()
+                    f.seek(0)
+                    same = next((fn for fn in os.listdir(folder_path) if os.path.isfile(os.path.join(folder_path, fn)) and os.path.getsize(os.path.join(folder_path, fn)) == f_sz), None)
+                    if same:
+                        filename = same
+                    else:
+                        safe_sup = re.sub(r'[^a-zA-Zа-яА-Я0-9_-]', '_', supplier)
+                        filename = f"{safe_sup}_{orig_name}".replace(' ', '_')
+                        f.save(os.path.join(folder_path, filename))
+        cur = conn.execute(
+            'INSERT INTO invoices (project_id, supplier, invoice_num, filename, delivery_cost, notes) VALUES (?, ?, ?, ?, ?, ?)',
+            (project_id, supplier, invoice_num, filename, delivery_cost, notes)
+        )
         inv_id = cur.lastrowid
-
-        for off in offers:
-            conn.execute('''
-                INSERT INTO offers (invoice_id, item_id, price, kg, meters)
-                VALUES (?, ?, ?, ?, ?)
-            ''', (inv_id, off['item_id'], off['price'], off['kg'], off['meters']))
-    return jsonify({'ok': True})
+        for off in offers_json:
+            conn.execute(
+                'INSERT INTO offers (invoice_id, item_id, price, kg, meters) VALUES (?, ?, ?, ?, ?)',
+                (inv_id, off['item_id'], float(off.get('price') or 0), off.get('kg', ''), off.get('meters', ''))
+            )
+    return jsonify({'ok': True, 'id': inv_id})
 
 @app.route('/api/invoices/<int:inv_id>/select_all', methods=['POST'])
-def select_all_invoice(inv_id):
-    sel = request.json.get('selected', 1)
+def select_all_invoice_offers(inv_id):
+    sel = int((request.json or {}).get('selected', 0))
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute("""
             UPDATE offers SET selected=?
             WHERE invoice_id=? AND kanban_status='' AND received_color=''
             AND (price > 0 OR kg != '' OR meters != '')
         """, (sel, inv_id))
-    return jsonify({'ok': True})
-
-@app.route('/api/invoices/<int:inv_id>/edit_meta', methods=['POST'])
-def edit_invoice_meta(inv_id):
-    data = request.json or {}
-    field = data.get('field')
-    val = data.get('value', '')
-    with sqlite3.connect(DB_PATH) as conn:
-        if field == 'delivery_cost':
-            conn.execute('UPDATE invoices SET delivery_cost=? WHERE id=?', (float(val or 0), inv_id))
-        elif field == 'notes':
-            conn.execute('UPDATE invoices SET notes=? WHERE id=?', (str(val).strip(), inv_id))
-    return jsonify({'ok': True})
-
-
-
-@app.route('/api/offers/<int:offer_id>/edit', methods=['POST'])
-def edit_offer(offer_id):
-    data = request.json or {}
-    price = float(data.get('price') or 0)
-    kg = str(data.get('kg') or '').strip()
-    meters = str(data.get('meters') or '').strip()
-    with sqlite3.connect(DB_PATH) as conn:
-        conn.execute('UPDATE offers SET price=?, kg=?, meters=? WHERE id=?', (price, kg, meters, offer_id))
     return jsonify({'ok': True})
 
 @app.route('/api/offers/<int:offer_id>/select', methods=['POST'])
@@ -990,6 +973,44 @@ def toggle_archive_project(proj_id):
     arch = int((request.json or {}).get('archived', 1))
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute('UPDATE projects SET archived=? WHERE id=?', (arch, proj_id))
+    return jsonify({'ok': True})
+
+
+@app.route('/api/invoices/reorder', methods=['POST'])
+def reorder_invoices():
+    order_ids = (request.json or {}).get('order', [])
+    with sqlite3.connect(DB_PATH) as conn:
+        for idx, inv_id in enumerate(order_ids, start=1):
+            conn.execute('UPDATE invoices SET sort_order=? WHERE id=?', (idx, int(inv_id)))
+    return jsonify({'ok': True})
+
+
+# Автозащита от пропажи вкладок при обновлениях
+assert 'id="view-projects"' in HTML_TEMPLATE
+assert 'id="view-kanban"' in HTML_TEMPLATE
+assert 'id="view-received"' in HTML_TEMPLATE
+assert 'id="view-archive"' in HTML_TEMPLATE
+
+
+@app.route('/api/invoices/<int:inv_id>/edit_meta', methods=['POST'])
+def edit_invoice_meta(inv_id):
+    d = request.json or {}
+    field = d.get('field')
+    val = d.get('value', '')
+    if field in ('delivery_cost', 'notes'):
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.execute(f'UPDATE invoices SET {field}=? WHERE id=?', (val, inv_id))
+    return jsonify({'ok': True})
+
+
+@app.route('/api/offers/<int:offer_id>/edit', methods=['POST'])
+def edit_offer_cell(offer_id):
+    d = request.json or {}
+    price = float(str(d.get('price') or 0).replace(',', '.').replace(' ', ''))
+    kg = str(d.get('kg') or '').strip()
+    meters = str(d.get('meters') or '').strip()
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute('UPDATE offers SET price=?, kg=?, meters=? WHERE id=?', (price, kg, meters, offer_id))
     return jsonify({'ok': True})
 
 if __name__ == '__main__':

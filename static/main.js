@@ -31,11 +31,17 @@ function showSaveNotice(msg) {
 }
 
 function switchTab(tabName, btn) {
-    document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
+    document.querySelectorAll('.view').forEach(v => {
+        v.classList.remove('active');
+        v.style.display = 'none';
+    });
     document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
     const target = document.getElementById('view-' + tabName);
-    if (target) target.classList.add('active');
-    if (btn) btn.classList.add('active');
+    if (target) {
+        target.classList.add('active');
+        target.style.display = 'block';
+    }
+    if (btn && btn.classList) btn.classList.add('active');
     if (tabName === 'projects') loadProjects();
     if (tabName === 'kanban') loadKanban();
     if (tabName === 'received') loadReceived();
@@ -184,6 +190,58 @@ function extractNum(val) {
     return m ? parseFloat(m) : 0;
 }
 
+let draggedInvId = null;
+
+async function saveInvoiceColumnsOrder(orderedIds) {
+    await fetch('/api/invoices/reorder', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({order: orderedIds})
+    });
+    await selectProject(currentProjectId);
+    showSaveNotice('✔ Порядок счетов сохранён!');
+}
+
+async function sortInvoicesByPriceAsc() {
+    if (!currentProjectData || !currentProjectData.invoices.length) return;
+    const offers = currentProjectData.offers;
+    const invWithSum = currentProjectData.invoices.map(inv => {
+        const sum = offers.filter(o => o.invoice_id === inv.id).reduce((a, o) => a + (parseFloat(o.price) || 0), 0);
+        return { id: inv.id, sum: sum > 0 ? sum : Infinity };
+    });
+    invWithSum.sort((a, b) => a.sum - b.sum);
+    await saveInvoiceColumnsOrder(invWithSum.map(x => x.id));
+}
+
+async function moveInvoiceCol(invId, dir) {
+    const ids = currentProjectData.invoices.map(x => x.id);
+    const idx = ids.indexOf(invId);
+    const targetIdx = idx + dir;
+    if (idx === -1 || targetIdx < 0 || targetIdx >= ids.length) return;
+    const tmp = ids.at(idx);
+    ids.splice(idx, 1);
+    ids.splice(targetIdx, 0, tmp);
+    await saveInvoiceColumnsOrder(ids);
+}
+
+function onInvDragStart(e, invId) {
+    draggedInvId = invId;
+    e.dataTransfer.effectAllowed = 'move';
+}
+
+async function onInvDrop(e, targetInvId) {
+    e.preventDefault();
+    if (!draggedInvId || draggedInvId === targetInvId) return;
+    const ids = currentProjectData.invoices.map(x => x.id);
+    const fromIdx = ids.indexOf(draggedInvId);
+    const toIdx = ids.indexOf(targetInvId);
+    if (fromIdx === -1 || toIdx === -1) return;
+    ids.splice(fromIdx, 1);
+    ids.splice(toIdx, 0, draggedInvId);
+    draggedInvId = null;
+    await saveInvoiceColumnsOrder(ids);
+}
+
 function renderComparisonTable() {
     const ws = document.getElementById('projectWorkspace');
     const p = currentProjectData.project;
@@ -198,7 +256,7 @@ function renderComparisonTable() {
         ? `<div style="display:flex;gap:5px;flex-wrap:wrap;"><input id="editProjNameInp" value="${p.name}" style="padding:3px;font-size:13px;width:240px;"><input id="editProjFolderInp" value="${p.folder_path}" style="padding:3px;font-size:12px;width:280px;"><button class="btn-green" style="padding:3px 8px;font-size:11px;" onclick="saveProjectMeta(${p.id})">💾 Сохранить</button><button class="btn-gray" style="padding:3px 8px;font-size:11px;" onclick="editingProjectMeta=false;renderComparisonTable()">✖</button></div>`
         : `<h3 style="margin:0;font-size:16px;">${p.name} <button type="button" onclick="editingProjectMeta=true;renderComparisonTable()" style="background:transparent;color:#475569;border:1px solid #cbd5e1;padding:1px 5px;font-size:11px;">✏️</button></h3><small style="color:#64748b;font-size:11px;">Папка: ${p.folder_path}</small>`;
 
-    let html = `<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;"><div>${projHeader}</div><div style="display:flex;gap:8px;flex-shrink:0;"><input type="file" id="importExcelInput" accept=".xlsx,.xlsm,.xls,.ods" style="display:none" onchange="importComparisonTable()"><button style="background:#0284c7;" onclick="document.getElementById('importExcelInput').click()">📥 Импорт таблицы</button><button onclick="openInvoiceModal()">+ Добавить счёт</button><button class="btn-green" onclick="sendSelectedToWork()">✔ В работу</button><button class="btn-gray" onclick="archiveProject(${p.id}, 1)">📦 В архив</button></div></div>${filesHtml}<div style="font-size:11px;margin-top:6px;color:#475569;">Подсветка: <span style="background:#dcfce7;padding:1px 6px;border:1px solid #86efac;">Самая дешёвая цена</span> <span style="background:#dbeafe;padding:1px 6px;border:1px solid #93c5fd;">Выгоднее за м / кг</span> <span style="background:#ffe4e6;padding:1px 6px;border:1px solid #fda4af;">Самая дорогая</span></div><div class="table-scroll"><table><thead><tr><th class="col-item">Заказываемый материал (Заявка) <button type="button" onclick="addNewItemRow()" style="float:right;background:#2563eb;color:#fff;padding:2px 6px;font-size:10px;">+ Строка</button></th>`;
+    let html = `<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;"><div>${projHeader}</div><div style="display:flex;gap:8px;flex-shrink:0;"><input type="file" id="importExcelInput" accept=".xlsx,.xlsm,.xls,.ods" style="display:none" onchange="importComparisonTable()"><button style="background:#0284c7;" onclick="document.getElementById('importExcelInput').click()">📥 Импорт таблицы</button><button style="background:#7c3aed;" onclick="sortInvoicesByPriceAsc()" title="Выстроить счета слева направо от самого дешёвого к дорогому">📊 По возрастанию цены</button><button onclick="openInvoiceModal()">+ Добавить счёт</button><button class="btn-green" onclick="sendSelectedToWork()">✔ В работу</button><button class="btn-gray" onclick="archiveProject(${p.id}, 1)">📦 В архив</button></div></div>${filesHtml}<div style="font-size:11px;margin-top:6px;color:#475569;">Подсветка: <span style="background:#dcfce7;padding:1px 6px;border:1px solid #86efac;">Самая дешёвая цена</span> <span style="background:#dbeafe;padding:1px 6px;border:1px solid #93c5fd;">Выгоднее за м / кг</span> <span style="background:#ffe4e6;padding:1px 6px;border:1px solid #fda4af;">Самая дорогая</span></div><div class="table-scroll"><table><thead><tr><th class="col-item">Заказываемый материал (Заявка) <button type="button" onclick="addNewItemRow()" style="float:right;background:#2563eb;color:#fff;padding:2px 6px;font-size:10px;">+ Строка</button></th>`;
 
     invoices.forEach(inv => {
         const invOffers = offers.filter(o => o.invoice_id === inv.id && !o.kanban_status && (o.price > 0 || o.kg || o.meters));
@@ -213,8 +271,8 @@ function renderComparisonTable() {
         if (editingInvoiceId === inv.id) {
             html += `<th class="col-sup" style="background:#fffbeb;"><input id="editInvSup_${inv.id}" value="${inv.supplier}" placeholder="Поставщик" style="padding:2px;font-size:11px;margin-bottom:3px;"><input id="editInvNum_${inv.id}" value="${inv.invoice_num || ''}" placeholder="Номер счёта" style="padding:2px;font-size:11px;margin-bottom:3px;"><div style="display:flex;gap:3px;"><button class="btn-green" style="padding:2px 6px;font-size:10px;flex:1;" onclick="saveInvoiceHeader(${inv.id})">💾</button><button class="btn-gray" style="padding:2px 6px;font-size:10px;" onclick="editingInvoiceId=null;keepScrollAndRender()">✖</button></div></th>`;
         } else {
-            const invEditBtn = `<span style="float:right;display:flex;gap:2px;"><button type="button" onclick="editingInvoiceId=${inv.id};keepScrollAndRender()" style="background:transparent;color:#475569;border:1px solid #cbd5e1;padding:0 4px;font-size:10px;">✏️</button><button type="button" onclick="deleteInvoiceCol(${inv.id})" style="background:transparent;color:#dc2626;border:1px solid #fecaca;padding:0 4px;font-size:10px;">🗑</button></span>`;
-            html += `<th class="col-sup">${invEditBtn}<div>${inv.supplier}</div><div style="font-weight:normal;font-size:11px;color:#475569;">${inv.invoice_num || ''}</div>${fl}${selectAllBtn}</th>`;
+            const invEditBtn = `<span style="float:right;display:flex;gap:2px;"><button type="button" onclick="moveInvoiceCol(${inv.id}, -1)" style="background:transparent;color:#475569;border:1px solid #cbd5e1;padding:0 4px;font-size:10px;" title="Сдвинуть столбец влево">◀</button><button type="button" onclick="moveInvoiceCol(${inv.id}, 1)" style="background:transparent;color:#475569;border:1px solid #cbd5e1;padding:0 4px;font-size:10px;" title="Сдвинуть столбец вправо">▶</button><button type="button" onclick="editingInvoiceId=${inv.id};keepScrollAndRender()" style="background:transparent;color:#475569;border:1px solid #cbd5e1;padding:0 4px;font-size:10px;">✏️</button><button type="button" onclick="deleteInvoiceCol(${inv.id})" style="background:transparent;color:#dc2626;border:1px solid #fecaca;padding:0 4px;font-size:10px;">🗑</button></span>`;
+            html += `<th class="col-sup" draggable="true" ondragstart="onInvDragStart(event, ${inv.id})" ondragover="event.preventDefault()" ondrop="onInvDrop(event, ${inv.id})" style="cursor:grab;" title="Перетащите за шапку влево или вправо">${invEditBtn}<div>${inv.supplier}</div><div style="font-weight:normal;font-size:11px;color:#475569;">${inv.invoice_num || ''}</div>${fl}${selectAllBtn}</th>`;
         }
     });
     html += `</tr></thead><tbody>`;
@@ -226,6 +284,7 @@ function renderComparisonTable() {
         const isService = lowName.includes('порезка') || lowName.includes('раскрой') || lowName.includes('доставка');
         const rowOffers = offers.filter(o => o.item_id === item.id && parseFloat(o.price) > 0);
         let minTotal = Infinity, maxTotal = -Infinity, minUnitM = Infinity, minUnitKg = Infinity;
+        let countM = 0, countKg = 0;
 
         if (!isService && rowOffers.length > 1) {
             rowOffers.forEach(o => {
@@ -233,9 +292,11 @@ function renderComparisonTable() {
                 if (pr < minTotal) minTotal = pr;
                 if (pr > maxTotal) maxTotal = pr;
                 const mVal = extractNum(o.meters), kgVal = extractNum(o.kg);
-                if (mVal > 0 && (pr / mVal) < minUnitM) minUnitM = pr / mVal;
-                if (kgVal > 0 && (pr / kgVal) < minUnitKg) minUnitKg = pr / kgVal;
+                if (mVal > 0) { countM++; if ((pr / mVal) < minUnitM) minUnitM = pr / mVal; }
+                if (kgVal > 0) { countKg++; if ((pr / kgVal) < minUnitKg) minUnitKg = pr / kgVal; }
             });
+            if (countM < 2) minUnitM = Infinity;
+            if (countKg < 2) minUnitKg = Infinity;
         }
 
         if (editingItemId === item.id) {
@@ -289,9 +350,9 @@ function renderComparisonTable() {
     invoices.forEach(inv => {
         const key = `deliv_${inv.id}`;
         if (editingMetaKey === key) {
-            html += `<td class="col-sup" style="background:#fffbeb;border:2px solid #f59e0b;"><input type="number" step="0.01" id="inp_${key}" value="${inv.delivery_cost || ''}" style="padding:3px;margin-bottom:4px;font-size:12px;"><div style="display:flex;gap:4px;"><button type="button" class="btn-green" style="padding:3px 7px;font-size:11px;flex:1;" onclick="saveEditedMeta(${inv.id}, 'delivery_cost', 'inp_${key}')">💾 Сохранить</button><button type="button" class="btn-gray" style="padding:3px 7px;font-size:11px;" onclick="editingMetaKey=null;keepScrollAndRender()">✖</button></div></td>`;
+            html += `<td class="col-sup" style="background:#fffbeb;border:2px solid #f59e0b;"><input type="number" step="0.01" id="inp_${key}" value="${inv.delivery_cost || ''}" style="padding:3px;margin-bottom:4px;font-size:12px;"><div style="display:flex;gap:4px;"><button type="button" class="btn-green" style="padding:3px 7px;font-size:11px;flex:1;" onclick="event.stopPropagation();saveEditedMeta(${inv.id}, 'delivery_cost', 'inp_${key}')">💾 Сохранить</button><button type="button" class="btn-gray" style="padding:3px 7px;font-size:11px;" onclick="editingMetaKey=null;keepScrollAndRender()">✖</button></div></td>`;
         } else {
-            const btn = `<button type="button" onclick="editingMetaKey='${key}';keepScrollAndRender()" style="float:right;background:transparent;color:#475569;border:1px solid #cbd5e1;padding:1px 5px;font-size:11px;">✏️</button>`;
+            const btn = `<button type="button" onclick="event.stopPropagation();editingMetaKey='${key}';keepScrollAndRender()" style="float:right;background:transparent;color:#475569;border:1px solid #cbd5e1;padding:1px 5px;font-size:11px;">✏️</button>`;
             html += `<td class="col-sup">${btn}${inv.delivery_cost ? '<b>' + inv.delivery_cost + ' руб.</b>' : '<span style="color:#94a3b8;">—</span>'}</td>`;
         }
     });
@@ -299,9 +360,9 @@ function renderComparisonTable() {
     invoices.forEach(inv => {
         const key = `notes_${inv.id}`;
         if (editingMetaKey === key) {
-            html += `<td class="col-sup" style="background:#fffbeb;border:2px solid #f59e0b;"><textarea id="inp_${key}" rows="2" style="padding:3px;margin-bottom:4px;font-size:11px;">${inv.notes || ''}</textarea><div style="display:flex;gap:4px;"><button type="button" class="btn-green" style="padding:3px 7px;font-size:11px;flex:1;" onclick="saveEditedMeta(${inv.id}, 'notes', 'inp_${key}')">💾 Сохранить</button><button type="button" class="btn-gray" style="padding:3px 7px;font-size:11px;" onclick="editingMetaKey=null;keepScrollAndRender()">✖</button></div></td>`;
+            html += `<td class="col-sup" style="background:#fffbeb;border:2px solid #f59e0b;"><textarea id="inp_${key}" rows="2" style="padding:3px;margin-bottom:4px;font-size:11px;">${inv.notes || ''}</textarea><div style="display:flex;gap:4px;"><button type="button" class="btn-green" style="padding:3px 7px;font-size:11px;flex:1;" onclick="event.stopPropagation();saveEditedMeta(${inv.id}, 'notes', 'inp_${key}')">💾 Сохранить</button><button type="button" class="btn-gray" style="padding:3px 7px;font-size:11px;" onclick="editingMetaKey=null;keepScrollAndRender()">✖</button></div></td>`;
         } else {
-            const btn = `<button type="button" onclick="editingMetaKey='${key}';keepScrollAndRender()" style="float:right;background:transparent;color:#475569;border:1px solid #cbd5e1;padding:1px 5px;font-size:11px;">✏️</button>`;
+            const btn = `<button type="button" onclick="event.stopPropagation();editingMetaKey='${key}';keepScrollAndRender()" style="float:right;background:transparent;color:#475569;border:1px solid #cbd5e1;padding:1px 5px;font-size:11px;">✏️</button>`;
             html += `<td class="col-sup">${btn}${inv.notes || '<span style="color:#94a3b8;">—</span>'}</td>`;
         }
     });
@@ -450,29 +511,68 @@ async function parseInvoiceFile() {
             mergedLines.push(rawLines[i]);
             if (i + 1 < rawLines.length) mergedLines.push(rawLines[i] + ' ' + rawLines[i + 1]);
         }
-        currentProjectData.items.forEach(item => {
+
+        // Сначала находим лучшее совпадение для каждой позиции заявки, чтобы одна строка счёта не попала в 2 товара
+        const usedLineIndexes = new Set();
+        const itemMatches = currentProjectData.items.map(item => {
+            const low = item.name.toLowerCase().replace(/х/g, 'x');
+            const tokens = low.replace(/[^а-яa-z0-9.,-]/g, ' ').split(/\s+/)
+                .filter(w => w.length >= 2 && !['шт','штук','штуки','мм','м','кг','под','этот','размер','длиной','для'].includes(w));
+            let bestIdx = -1, bestScore = 0, bestRatio = 0;
+            mergedLines.forEach((line, idx) => {
+                const lLow = line.toLowerCase().replace(/х/g, 'x');
+                if (lLow.includes('итого') || lLow.includes('всего к оплате') || lLow.includes('в том числе ндс')) return;
+                if (!/[0-9]+[.,][0-9]{2}/.test(line)) return;
+                let score = 0;
+                tokens.forEach(t => { if (lLow.includes(t)) score++; });
+                const ratio = tokens.length > 0 ? score / tokens.length : 0;
+                if (score > bestScore || (score === bestScore && ratio > bestRatio)) {
+                    bestScore = score;
+                    bestRatio = ratio;
+                    bestIdx = idx;
+                }
+            });
+            return { item, bestIdx, bestScore, bestRatio, tokensCount: tokens.length };
+        });
+
+        // Сортируем от наиболее точных совпадений к менее точным
+        itemMatches.sort((a, b) => (b.bestScore - a.bestScore) || (b.bestRatio - a.bestRatio));
+
+        itemMatches.forEach(m => {
+            const item = m.item;
             const low = item.name.toLowerCase();
             const prInp = document.getElementById(`off_price_${item.id}`);
             if (data.cut_price && (low.includes('порезка') || low.includes('раскрой'))) { prInp.value = data.cut_price; return; }
             if (data.deliv_price && low.includes('доставка')) { prInp.value = data.deliv_price; return; }
-            const tokens = low.replace(/[^а-яa-z0-9-]/g, ' ').split(/\s+/).filter(w => w.length >= 3 && !['штук','штуки','ленточная','пила','станок','услуга','для'].includes(w));
-            let bestLine = '', bestScore = 0;
-            mergedLines.forEach(line => {
-                const lLow = line.toLowerCase();
-                if (lLow.includes('итого') || lLow.includes('всего к оплате') || lLow.includes('в том числе ндс')) return;
-                let score = 0;
-                tokens.forEach(t => { if (lLow.includes(t)) score++; });
-                if (score > bestScore && /[0-9]+[.,][0-9]{2}/.test(line)) { bestScore = score; bestLine = line; }
-            });
-            if (bestLine && bestScore >= 1) {
+
+            // Требуем совпадения минимум 2 признаков (или 1, если в названии товара всего 1-2 слова) и чтобы строка ещё не была занята
+            const minRequired = m.tokensCount >= 3 ? 2 : 1;
+            if (m.bestIdx !== -1 && m.bestScore >= minRequired && !usedLineIndexes.has(m.bestIdx)) {
+                usedLineIndexes.add(m.bestIdx);
+                // Помечаем соседнюю склеенную строку тоже как занятую
+                usedLineIndexes.add(m.bestIdx - 1);
+                usedLineIndexes.add(m.bestIdx + 1);
+                const bestLine = mergedLines[m.bestIdx];
                 const money = bestLine.match(/[0-9]{1,3}(?:[\s\u00a0]?[0-9]{3})*[.,][0-9]{2}/g);
-                if (money && money.length > 0) prInp.value = money[money.length - 1].replace(/[\s\u00a0]/g, '').replace(',', '.');
+                if (money && money.length > 0) {
+                    let val = parseFloat(money[money.length - 1].replace(/[\s\u00a0]/g, '').replace(',', '.'));
+                    const mSub = data.text.match(/Итого\s*:[^0-9\n]*([0-9]{1,3}(?:[\s\u00a0]?[0-9]{3})*[.,][0-9]{2})/i);
+                    const mVat = data.text.match(/Итого\s+НДС\s*:[^0-9\n]*([0-9]{1,3}(?:[\s\u00a0]?[0-9]{3})*[.,][0-9]{2})/i);
+                    if (mSub && mVat && data.total_sum) {
+                        const subVal = parseFloat(mSub[1].replace(/[\s\u00a0]/g, '').replace(',', '.'));
+                        const totVal = parseFloat(data.total_sum);
+                        if (subVal > 0 && totVal > subVal && Math.abs(val - subVal) < 1) val = totVal;
+                        else if (subVal > 0 && totVal > subVal) val = +(val * (totVal / subVal)).toFixed(2);
+                    }
+                    prInp.value = val.toFixed(2);
+                }
             } else if (currentProjectData.items.length === 1 && data.total_sum && !prInp.value) {
                 prInp.value = data.total_sum;
             }
         });
     }
 }
+
 function calcVat(mult) {
     const val = parseFloat(document.getElementById('vatInput').value);
     if (!isNaN(val)) document.getElementById('vatResult').innerText = '= ' + (val * mult).toFixed(2) + ' руб. с НДС';
@@ -573,14 +673,14 @@ function renderKanbanBoard() {
         div.className = 'k-card' + (c.arrival_date && c.arrival_date <= today ? ' overdue' : '');
         div.draggable = true;
         div.ondragstart = (e) => { e.dataTransfer.setData('text/plain', JSON.stringify({inv_id: c.invoice_id, old_status: c.kanban_status})); };
-        let fileLink = c.filename ? `<a href="/api/invoice_file/${c.invoice_id}" target="_blank" style="font-size:12px;">📄 Открыть счёт</a>` : '';
+        let fileLink = c.filename ? `<a href="/api/invoice_file/${c.invoice_id}" target="_blank" style="font-size:11px;color:#2563eb;text-decoration:none;white-space:nowrap;">📄 Счёт</a>` : '';
         const invLabel = (c.invoice_num && c.invoice_num !== 'Из таблицы') ? ` — ${c.invoice_num}` : '';
         const steps = ['accounting', 'paid', 'transit', 'arrived'];
         const stepLabels = { accounting: 'В бухгалтерию', paid: 'Оплачено', transit: 'В пути', arrived: 'Прибыло' };
         const idx = steps.indexOf(c.kanban_status);
-        const prevBtn = idx > 0 ? `<button type="button" class="btn-gray" style="padding:3px 7px;font-size:11px;" onclick="moveCardStep(${c.invoice_id}, '${c.kanban_status}', '${steps[idx - 1]}')" title="Вернуть на предыдущий этап">◀</button>` : '';
-        const nextBtn = idx < steps.length - 1 ? `<button type="button" style="background:#0284c7;padding:3px 8px;font-size:11px;flex:1;" onclick="moveCardStep(${c.invoice_id}, '${c.kanban_status}', '${steps[idx + 1]}')">➡ ${stepLabels[steps[idx + 1]]}</button>` : '';
-        div.innerHTML = `<div style="font-size:12px;font-weight:bold;color:#1d4ed8;margin-bottom:3px;">📁 ${c.project_name}</div><div style="font-size:13px;font-weight:bold;color:#0f172a;">${c.supplier}${invLabel}</div><div style="font-size:12px;color:#475569;margin:4px 0;">Позиций: <b>${c.items_count}</b> | Итого: <b>${(c.total_price || 0).toFixed(2)} руб.</b></div><div style="font-size:12px;margin-top:6px;"><input type="text" placeholder="ТК" value="${c.carrier || ''}" onchange="updateLogistics(${c.invoice_id}, 'carrier', this.value)" style="margin-bottom:4px;padding:4px;"><input type="text" placeholder="Трек-номер" value="${c.track_num || ''}" onchange="updateLogistics(${c.invoice_id}, 'track_num', this.value)" style="margin-bottom:4px;padding:4px;"><input type="date" value="${c.arrival_date || ''}" onchange="updateLogistics(${c.invoice_id}, 'arrival_date', this.value)" style="padding:4px;"></div><div style="display:flex;gap:4px;margin-top:6px;">${prevBtn}${nextBtn}</div><div style="display:flex;justify-content:space-between;align-items:center;margin-top:8px;">${fileLink}<button class="btn-green" style="padding:4px 8px;font-size:12px;" onclick="openColorModal(${c.invoice_id})">✔ Получено</button></div>`;
+        const prevBtn = idx > 0 ? `<button type="button" class="btn-gray" style="padding:2px 6px;font-size:10px;" onclick="moveCardStep(${c.invoice_id}, '${c.kanban_status}', '${steps[idx - 1]}')" title="Вернуть на предыдущий этап">◀</button>` : '';
+        const nextBtn = idx < steps.length - 1 ? `<button type="button" style="background:#0284c7;padding:2px 6px;font-size:10px;flex:1;" onclick="moveCardStep(${c.invoice_id}, '${c.kanban_status}', '${steps[idx + 1]}')">➡ ${stepLabels[steps[idx + 1]]}</button>` : '';
+        div.innerHTML = `<div style="display:flex;justify-content:space-between;align-items:baseline;gap:4px;"><span style="font-size:11px;font-weight:bold;color:#1d4ed8;">📁 ${c.project_name}</span><span style="font-size:11px;color:#475569;white-space:nowrap;">${c.items_count} поз. | <b>${(c.total_price || 0).toFixed(2)} р.</b></span></div><div style="font-size:11px;font-weight:bold;color:#0f172a;margin:2px 0 4px 0;">${c.supplier}${invLabel}</div><div style="margin-bottom:3px;"><input type="text" placeholder="ТК" value="${c.carrier || ''}" onchange="updateLogistics(${c.invoice_id}, 'carrier', this.value)" style="padding:2px 5px;font-size:11px;height:22px;"></div><div style="display:flex;gap:4px;margin-bottom:4px;"><input type="text" placeholder="Трек-номер" value="${c.track_num || ''}" onchange="updateLogistics(${c.invoice_id}, 'track_num', this.value)" style="padding:2px 5px;font-size:11px;height:22px;flex:1;min-width:0;"><input type="date" value="${c.arrival_date || ''}" onchange="updateLogistics(${c.invoice_id}, 'arrival_date', this.value)" style="padding:1px 4px;font-size:11px;height:22px;width:112px;flex-shrink:0;"></div><div style="display:flex;align-items:center;gap:4px;">${prevBtn}${nextBtn}${fileLink}<button class="btn-green" style="padding:2px 7px;font-size:10px;white-space:nowrap;" onclick="openColorModal(${c.invoice_id})">✔ Получено</button></div>`;
         if (document.getElementById('k-' + c.kanban_status)) document.getElementById('k-' + c.kanban_status).appendChild(div);
     });
 }
