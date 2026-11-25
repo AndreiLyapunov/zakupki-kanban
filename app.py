@@ -28,7 +28,7 @@ def create_backup(reason='auto'):
         shutil.copy2(DB_PATH, dst)
         # Храним последние 30 резервных копий, старые удаляем
         files = sorted([os.path.join(BACKUP_DIR, fn) for fn in os.listdir(BACKUP_DIR) if fn.endswith('.db')])
-        for old_f in files[:-30]:
+        for old_f in files[:-3]:
             os.remove(old_f)
         return dst
     return ''
@@ -79,6 +79,14 @@ def init_db():
                 received_color TEXT DEFAULT ''
             )
         ''')
+        try:
+            conn.execute('ALTER TABLE projects ADD COLUMN archived INTEGER DEFAULT 0')
+        except Exception:
+            pass
+        try:
+            conn.execute('ALTER TABLE projects ADD COLUMN sort_order INTEGER DEFAULT NULL')
+        except Exception:
+            pass
 
 def make_safe_folder(name):
     clean = re.sub(r'[^\w\s-]', '', name).strip().replace(' ', '_')
@@ -117,11 +125,23 @@ def read_spreadsheet_rows(filepath):
                 rows.append(r_vals)
     return rows
 
+def ocr_image_obj(img):
+    try:
+        import pytesseract
+        return pytesseract.image_to_string(img, lang='rus+eng').strip()
+    except Exception:
+        return ""
+
 def extract_text_from_file(filepath):
     _, ext = os.path.splitext(filepath)
     ext = ext.lower()
     if ext in ['.jpg', '.jpeg', '.png', '.bmp', '.tif', '.tiff']:
-        return "", True
+        try:
+            from PIL import Image
+            txt = ocr_image_obj(Image.open(filepath))
+            return (txt, False) if len(txt) > 10 else ("", True)
+        except Exception:
+            return "", True
     if ext == '.pdf':
         text_parts = []
         try:
@@ -131,11 +151,21 @@ def extract_text_from_file(filepath):
                     if t:
                         text_parts.append(t)
         except Exception:
-            return "", True
+            pass
         full_text = "\n".join(text_parts).strip()
-        if len(full_text) < 20:
-            return "", True
-        return full_text, False
+        if len(full_text) >= 20:
+            return full_text, False
+        # Если текстового слоя нет (скан PDF) — распознаём через Tesseract OCR
+        try:
+            from pdf2image import convert_from_path
+            images = convert_from_path(filepath, dpi=200)
+            ocr_parts = [ocr_image_obj(img) for img in images]
+            ocr_text = "\n".join([t for t in ocr_parts if t]).strip()
+            if len(ocr_text) >= 15:
+                return "[Распознано со скана OCR]\n" + ocr_text, False
+        except Exception:
+            pass
+        return "", True
     if ext in ['.xlsx', '.xlsm', '.xls', '.ods']:
         try:
             rows = read_spreadsheet_rows(filepath)
@@ -180,14 +210,14 @@ HTML_TEMPLATE = '''
         .btn-green:hover { background: #15803d; }
         .btn-gray { background: #64748b; }
         
-        .table-scroll { width: 100%; max-height: calc(100vh - 210px); overflow: auto; margin-top: 10px; border: 1px solid #94a3b8; border-radius: 5px; }
-        table { width: max-content; border-collapse: separate; border-spacing: 0; font-size: 12px; }
+        .table-scroll { width: 100%; max-height: calc(100vh - 175px); overflow: auto; margin-top: 10px; border: 1px solid #94a3b8; border-radius: 5px; }
+        table { width: max-content; border-collapse: separate; border-spacing: 0; font-size: 11px; }
         thead th { position: sticky; top: 0; background: #f1f5f9; z-index: 4; border-bottom: 2px solid #94a3b8; }
         .col-item { width: 290px; min-width: 290px; max-width: 290px; position: sticky; left: 0; background: #fff; z-index: 3; border-right: 2px solid #94a3b8 !important; box-shadow: 3px 0 6px rgba(0,0,0,0.08); }
         thead th.col-item { background: #f1f5f9; z-index: 5; }
         .col-sup { width: 240px; min-width: 240px; max-width: 240px; }
         .badge-st { display: inline-block; padding: 2px 5px; border-radius: 3px; font-size: 10px; margin: 2px 2px 0 0; font-weight: bold; }
-        th, td { border: 1px solid #cbd5e1; padding: 8px; vertical-align: top; }
+        th, td { border: 1px solid #cbd5e1; padding: 4px 6px; vertical-align: top; line-height: 1.25; }
         th { background: #f8fafc; text-align: left; }
         .price-best { background-color: #dcfce7 !important; }
         .price-unit-best { background-color: #dbeafe !important; }
@@ -214,6 +244,19 @@ HTML_TEMPLATE = '''
         .modal-box { background: #fff; padding: 20px; border-radius: 8px; width: 650px; max-width: 95%; max-height: 90vh; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; }
         input[type="text"], input[type="number"], input[type="date"], textarea { width: 100%; padding: 7px; border: 1px solid #cbd5e1; border-radius: 4px; }
         .scan-alert { background: #fef2f2; border: 1px solid #dc2626; color: #991b1b; padding: 10px; border-radius: 5px; font-weight: bold; display: none; }
+    
+        tr.row-focused td,
+        tr.row-focused td.col-item,
+        tr.row-focused td.price-best,
+        tr.row-focused td.price-unit-best,
+        tr.row-focused td.price-worst,
+        tr.row-focused td.offer-selected,
+        tr.row-focused td.c-1, tr.row-focused td.c-2, tr.row-focused td.c-3,
+        tr.row-focused td.c-4, tr.row-focused td.c-5, tr.row-focused td.c-6, tr.row-focused td.c-7 {
+            border-top: 2px solid #2563eb !important;
+            border-bottom: 2px solid #2563eb !important;
+            background-color: #dbeafe !important;
+        }
     </style>
 </head>
 <body>
@@ -221,22 +264,24 @@ HTML_TEMPLATE = '''
 <div class="topbar">
     <h2>Управление закупками по проектам</h2>
     <div class="tabs">
-        <button class="tab-btn" style="background:#0f766e;" onclick="makeBackupNow()" title="Сохранить копию базы данных">💾 Резервная копия</button>
+        <button class="tab-btn" style="background:#0f766e;" onclick="makeBackupNow()" title="Сохранить копию базы данных">💾 Бэкап базы</button>
+        <button class="tab-btn" style="background:#0369a1;" onclick="makeCodeBackupNow()" title="Сохранить полную копию кода программы и базы">📦 Бэкап программы</button>
         <button class="tab-btn active" onclick="switchTab('projects', this)">1. Проекты и сравнение счетов</button>
         <button class="tab-btn" onclick="switchTab('kanban', this)">2. В работе (Оплата и доставка)</button>
         <button class="tab-btn" onclick="switchTab('received', this)">3. Полученные товары</button>
+        <button class="tab-btn" onclick="switchTab('archive', this)">4. Архив</button>
     </div>
 </div>
 
-<!-- ВКЛАДКА 1: ПРОЕКТЫ -->
+<!-- ВКЛАДКА 1: ПРОЕКТЫ И СРАВНЕНИЕ -->
 <div id="view-projects" class="view active">
     <div class="proj-layout">
         <div class="proj-sidebar">
-            <button style="width: 100%; margin-bottom: 10px;" onclick="openProjectModal()">+ Новый проект</button>
+            <button style="width:100%; margin-bottom:10px;" onclick="openProjectModal()">+ Новый проект</button>
             <div id="projectList"></div>
         </div>
         <div class="proj-main" id="projectWorkspace">
-            <p style="color: #64748b;">Выберите проект слева или создайте новый, чтобы загрузить список закупки и сравнить счета.</p>
+            <p style="color: #64748b;">Выберите проект слева или создайте новый, чтобы начать сравнение счетов.</p>
         </div>
     </div>
 </div>
@@ -249,23 +294,23 @@ HTML_TEMPLATE = '''
             <div id="kanbanProjectsList"></div>
         </div>
         <div class="kanban-board" style="flex: 1;">
-        <div class="k-col" ondrop="dropCard(event, 'accounting')" ondragover="allowDrop(event)">
-            <h3>Передано в бухгалтерию</h3>
-            <div class="k-list" id="k-accounting"></div>
+            <div class="k-col" ondrop="dropCard(event, 'accounting')" ondragover="allowDrop(event)">
+                <h3>Передано в бухгалтерию</h3>
+                <div class="k-list" id="k-accounting"></div>
+            </div>
+            <div class="k-col" ondrop="dropCard(event, 'paid')" ondragover="allowDrop(event)">
+                <h3>Оплачено / Ждём отгрузку</h3>
+                <div class="k-list" id="k-paid"></div>
+            </div>
+            <div class="k-col" ondrop="dropCard(event, 'transit')" ondragover="allowDrop(event)">
+                <h3>В пути</h3>
+                <div class="k-list" id="k-transit"></div>
+            </div>
+            <div class="k-col" ondrop="dropCard(event, 'arrived')" ondragover="allowDrop(event)">
+                <h3>Прибыло / На приёмке</h3>
+                <div class="k-list" id="k-arrived"></div>
+            </div>
         </div>
-        <div class="k-col" ondrop="dropCard(event, 'paid')" ondragover="allowDrop(event)">
-            <h3>Оплачено / Ждём отгрузку</h3>
-            <div class="k-list" id="k-paid"></div>
-        </div>
-        <div class="k-col" ondrop="dropCard(event, 'transit')" ondragover="allowDrop(event)">
-            <h3>В пути</h3>
-            <div class="k-list" id="k-transit"></div>
-        </div>
-        <div class="k-col" ondrop="dropCard(event, 'arrived')" ondragover="allowDrop(event)">
-            <h3>Прибыло / На приёмке</h3>
-            <div class="k-list" id="k-arrived"></div>
-        </div>
-    </div>
     </div>
 </div>
 
@@ -278,6 +323,19 @@ HTML_TEMPLATE = '''
         </div>
         <div class="proj-main" id="receivedDetailsWorkspace">
             <p style="color: #64748b;">Выберите полученный проект и счёт слева, чтобы посмотреть список поступивших товаров.</p>
+        </div>
+    </div>
+</div>
+
+<!-- ВКЛАДКА 4: АРХИВ -->
+<div id="view-archive" class="view">
+    <div class="proj-layout">
+        <div class="proj-sidebar">
+            <h3 style="margin: 0 0 10px 0; font-size: 15px;">📦 Архив проектов</h3>
+            <div id="archiveProjectList"></div>
+        </div>
+        <div class="proj-main" id="archiveWorkspace">
+            <p style="color: #64748b;">Выберите проект в архиве слева, чтобы просмотреть его оплаченные счета или вернуть в активную работу.</p>
         </div>
     </div>
 </div>
@@ -356,7 +414,7 @@ HTML_TEMPLATE = '''
     </div>
 </div>
 
-<script src="/static/main.js?v=2"></script>
+<script src="/static/main.js?v=27"></script>
 
 </body>
 </html>
@@ -396,7 +454,8 @@ def serve_invoice_file(inv_id):
 def get_projects():
     with sqlite3.connect(DB_PATH) as conn:
         conn.row_factory = sqlite3.Row
-        rows = conn.execute('SELECT * FROM projects ORDER BY created_at DESC, id DESC').fetchall()
+        arch = int(request.args.get('archived', 0))
+        rows = conn.execute('SELECT * FROM projects WHERE COALESCE(archived, 0)=? ORDER BY created_at DESC, id DESC', (arch,)).fetchall()
         res = []
         for r in rows:
             d = dict(r)
@@ -459,10 +518,36 @@ def detect_services_from_text(text):
             deliv_price = val
     return cut_price, deliv_price
 
+def parse_invoice_metadata_and_lines(filename, text):
+    # Извлекаем номер/дату счёта и поставщика из имени файла или текста
+    base_name = os.path.splitext(filename)
+    inv_num = ''
+    supplier = ''
+    m_fn = re.search(r'(сч[её]т\s*№?\s*[0-9A-Za-zА-Яа-я/-]+(?:\s*от\s*[0-9.]+)?)', base_name, re.IGNORECASE)
+    if m_fn:
+        inv_num = m_fn.group(1).strip()
+        rest = base_name.replace(m_fn.group(0), '').strip(' _-.')
+        if rest:
+            supplier = rest.capitalize()
+    if not inv_num and text:
+        m_txt = re.search(r'(сч[её]т\s*№?\s*[0-9A-Za-zА-Яа-я/-]+(?:\s*от\s*[0-9.]+\s*(?:г\.|года)?)?)', text, re.IGNORECASE)
+        if m_txt:
+            inv_num = m_txt.group(1).strip()
+    if not supplier and text:
+        m_sup = re.search(r'(?:Поставщик|Продавец)[:\s]+([^\n,]+)', text, re.IGNORECASE)
+        if m_sup:
+            supplier = m_sup.group(1).strip()
+    total_sum = ''
+    if text:
+        m_tot = re.search(r'(?:Всего к оплате|Всего с НДС|Итого с НДС|Итого к оплате)[^0-9\n]*([0-9]{1,3}(?:[\s\u00a0]?[0-9]{3})*[.,][0-9]{2})', text, re.IGNORECASE)
+        if m_tot:
+            total_sum = m_tot.group(1).replace(' ', '').replace('\u00a0', '').replace(',', '.')
+    return supplier, inv_num, total_sum
+
 @app.route('/api/parse_preview', methods=['POST'])
 def parse_preview():
     if 'file' not in request.files:
-        return jsonify({'is_scan': True, 'text': '', 'cut_price': '', 'deliv_price': ''})
+        return jsonify({'is_scan': True, 'text': '', 'cut_price': '', 'deliv_price': '', 'supplier': '', 'invoice_num': ''})
     f = request.files['file']
     temp_path = os.path.join(BASE_DIR, 'temp_preview_' + f.filename)
     f.save(temp_path)
@@ -470,7 +555,8 @@ def parse_preview():
     if os.path.exists(temp_path):
         os.remove(temp_path)
     cut_price, deliv_price = ('', '') if is_scan else detect_services_from_text(text)
-    return jsonify({'is_scan': is_scan, 'text': text, 'cut_price': cut_price, 'deliv_price': deliv_price})
+    supplier, inv_num, total_sum = parse_invoice_metadata_and_lines(f.filename, text)
+    return jsonify({'is_scan': is_scan, 'text': text, 'cut_price': cut_price, 'deliv_price': deliv_price, 'supplier': supplier, 'invoice_num': inv_num, 'total_sum': total_sum})
 
 @app.route('/api/invoices', methods=['POST'])
 def add_invoice():
@@ -530,6 +616,8 @@ def edit_invoice_meta(inv_id):
         elif field == 'notes':
             conn.execute('UPDATE invoices SET notes=? WHERE id=?', (str(val).strip(), inv_id))
     return jsonify({'ok': True})
+
+
 
 @app.route('/api/offers/<int:offer_id>/edit', methods=['POST'])
 def edit_offer(offer_id):
@@ -764,6 +852,145 @@ def open_browser():
 def api_backup_now():
     path = create_backup('manual')
     return jsonify({'ok': True, 'file': os.path.basename(path)})
+
+
+@app.route('/api/projects/<int:proj_id>/edit_info', methods=['POST'])
+def edit_project_info(proj_id):
+    d = request.json or {}
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute('UPDATE projects SET name=?, folder_path=? WHERE id=?',
+                     (d.get('name', '').strip(), d.get('folder_path', '').strip(), proj_id))
+    return jsonify({'ok': True})
+
+@app.route('/api/projects/<int:proj_id>/items', methods=['POST'])
+def add_project_item(proj_id):
+    name = (request.json or {}).get('name', '').strip()
+    if name:
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.execute('INSERT INTO project_items (project_id, name) VALUES (?, ?)', (proj_id, name))
+    return jsonify({'ok': True})
+
+@app.route('/api/items/<int:item_id>/edit', methods=['POST'])
+def edit_project_item(item_id):
+    name = (request.json or {}).get('name', '').strip()
+    with sqlite3.connect(DB_PATH) as conn:
+        if name:
+            conn.execute('UPDATE project_items SET name=? WHERE id=?', (name, item_id))
+    return jsonify({'ok': True})
+
+@app.route('/api/items/<int:item_id>/delete', methods=['POST'])
+def delete_project_item(item_id):
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute('DELETE FROM offers WHERE item_id=?', (item_id,))
+        conn.execute('DELETE FROM project_items WHERE id=?', (item_id,))
+    return jsonify({'ok': True})
+
+@app.route('/api/invoices/<int:inv_id>/delete', methods=['POST'])
+def delete_invoice(inv_id):
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute('DELETE FROM offers WHERE invoice_id=?', (inv_id,))
+        conn.execute('DELETE FROM invoices WHERE id=?', (inv_id,))
+    return jsonify({'ok': True})
+
+@app.route('/api/invoices/<int:inv_id>/edit_header', methods=['POST'])
+def edit_invoice_header(inv_id):
+    d = request.json or {}
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute('UPDATE invoices SET supplier=?, invoice_num=? WHERE id=?',
+                     (d.get('supplier', '').strip(), d.get('invoice_num', '').strip(), inv_id))
+    return jsonify({'ok': True})
+
+
+
+
+@app.route('/api/invoices/<int:inv_id>/add_cell', methods=['POST'])
+def add_invoice_cell(inv_id):
+    d = request.json or {}
+    item_id = int(d.get('item_id'))
+    price = float(str(d.get('price') or 0).replace(',', '.').replace(' ', ''))
+    kg = str(d.get('kg') or '').strip()
+    meters = str(d.get('meters') or '').strip()
+    with sqlite3.connect(DB_PATH) as conn:
+        row = conn.execute('SELECT id FROM offers WHERE invoice_id=? AND item_id=?', (inv_id, item_id)).fetchone()
+        if row:
+            conn.execute('UPDATE offers SET price=?, kg=?, meters=? WHERE id=?', (price, kg, meters, row[0]))
+        else:
+            conn.execute('INSERT INTO offers (invoice_id, item_id, price, kg, meters) VALUES (?, ?, ?, ?, ?)',
+                         (inv_id, item_id, price, kg, meters))
+    return jsonify({'ok': True})
+
+
+@app.route('/api/invoices/<int:inv_id>/attach_file', methods=['POST'])
+def attach_invoice_file(inv_id):
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute('SELECT i.supplier, p.folder_path FROM invoices i JOIN projects p ON i.project_id = p.id WHERE i.id=?', (inv_id,)).fetchone()
+        if not row:
+            return jsonify({'ok': False})
+        fp = row['folder_path']
+        if request.is_json:
+            fn = (request.json or {}).get('filename', '').strip()
+            if fn and os.path.exists(os.path.join(fp, fn)):
+                conn.execute('UPDATE invoices SET filename=? WHERE id=?', (fn, inv_id))
+                return jsonify({'ok': True})
+        elif 'file' in request.files and request.files['file'].filename:
+            f = request.files['file']
+            orig_name = os.path.basename(f.filename)
+            if os.path.isdir(fp):
+                if not os.path.exists(os.path.join(fp, orig_name)):
+                    f.save(os.path.join(fp, orig_name))
+                conn.execute('UPDATE invoices SET filename=? WHERE id=?', (orig_name, inv_id))
+                return jsonify({'ok': True})
+    return jsonify({'ok': False})
+
+
+@app.route('/api/invoices/<int:inv_id>/detach_file', methods=['POST'])
+def detach_invoice_file(inv_id):
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute("UPDATE invoices SET filename='' WHERE id=?", (inv_id,))
+    return jsonify({'ok': True})
+
+
+@app.route('/api/backup_code', methods=['POST'])
+def api_backup_code():
+    import zipfile
+    from datetime import datetime
+    ts = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+    zip_name = f'program_backup_{ts}.zip'
+    zip_path = os.path.join(BACKUP_DIR, zip_name)
+    with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
+        for fn in ['app.py', 'toggle_zakupki.sh', 'README.md', '.gitignore', 'zakupki.db']:
+            full = os.path.join(BASE_DIR, fn)
+            if os.path.exists(full):
+                zf.write(full, arcname=fn)
+        static_dir = os.path.join(BASE_DIR, 'static')
+        if os.path.isdir(static_dir):
+            for fn in os.listdir(static_dir):
+                full = os.path.join(static_dir, fn)
+                if os.path.isfile(full):
+                    zf.write(full, arcname=os.path.join('static', fn))
+    # Храним последние 3 архива программы
+    zips = sorted([os.path.join(BACKUP_DIR, fn) for fn in os.listdir(BACKUP_DIR) if fn.startswith('program_backup_') and fn.endswith('.zip')])
+    for old_z in zips[:-3]:
+        os.remove(old_z)
+    return jsonify({'ok': True, 'file': zip_name})
+
+
+@app.route('/api/projects/reorder', methods=['POST'])
+def reorder_projects():
+    order_ids = (request.json or {}).get('order', [])
+    with sqlite3.connect(DB_PATH) as conn:
+        for idx, pid in enumerate(order_ids, start=1):
+            conn.execute('UPDATE projects SET sort_order=? WHERE id=?', (idx, int(pid)))
+    return jsonify({'ok': True})
+
+
+@app.route('/api/projects/<int:proj_id>/archive', methods=['POST'])
+def toggle_archive_project(proj_id):
+    arch = int((request.json or {}).get('archived', 1))
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute('UPDATE projects SET archived=? WHERE id=?', (arch, proj_id))
+    return jsonify({'ok': True})
 
 if __name__ == '__main__':
     init_db()
